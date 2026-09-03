@@ -13,6 +13,11 @@ output "ingestion_dlq_arn" {
   value       = module.ingestion_queue.dlq_arn
 }
 
+output "sink_dlq_bucket" {
+  description = "S3 bucket containing individual OpenSearch sink document failures."
+  value       = module.sink_dlq.bucket_id
+}
+
 output "opensearch_collection_endpoint" {
   description = "Private OpenSearch Serverless collection endpoint."
   value       = module.opensearch_serverless.collection_endpoint
@@ -27,4 +32,3 @@ output "ingestion_pipeline_arn" {
   description = "OpenSearch Ingestion pipeline ARN."
   value       = module.opensearch_ingestion.pipeline_arn
 }
-

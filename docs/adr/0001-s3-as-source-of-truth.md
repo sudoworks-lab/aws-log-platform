@@ -9,9 +9,8 @@ Search clusters optimize for indexing and investigation, not for being the only 
 
 ## Decision
 
-Every core pipeline input is an immutable NDJSON or gzip NDJSON object in S3. S3 retains and transitions raw objects independently of OpenSearch. OpenSearch is a hot, rebuildable projection.
+Every core pipeline input is an immutable NDJSON or gzip NDJSON object in S3. S3 retains and transitions raw objects independently of OpenSearch. OpenSearch is a time-bounded, rebuildable search projection.
 
 ## Consequences
 
 Search can be rebuilt from an explicit S3 key/time range. S3 lifecycle, versioning, access, restore latency, and replay cost become first-class operational concerns. The architecture accepts eventual searchability and at-least-once duplicate risk rather than treating OpenSearch acknowledgement as the durability boundary.
-

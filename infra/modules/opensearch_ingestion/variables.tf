@@ -59,6 +59,17 @@ variable "queue_visibility_timeout_seconds" {
   }
 }
 
+variable "visibility_duplicate_protection_timeout_seconds" {
+  description = "Maximum total time that OSIS may extend SQS message visibility while an object remains in flight."
+  type        = number
+  default     = 7200
+
+  validation {
+    condition     = var.visibility_duplicate_protection_timeout_seconds >= 30 && var.visibility_duplicate_protection_timeout_seconds <= 86400
+    error_message = "visibility_duplicate_protection_timeout_seconds must be between 30 and 86400."
+  }
+}
+
 variable "pipeline_role_arn" {
   description = "Role assumed by OpenSearch Ingestion for source and sink access."
   type        = string
@@ -80,13 +91,34 @@ variable "collection_endpoint" {
 }
 
 variable "index_name" {
-  description = "Static index name for the hot log projection."
+  description = "Static index name for the rebuildable log search projection."
   type        = string
   default     = "logs"
 
   validation {
     condition     = can(regex("^[a-z0-9][a-z0-9_-]*$", var.index_name)) && length(var.index_name) <= 255
     error_message = "index_name must be a lowercase OpenSearch index name."
+  }
+}
+
+variable "sink_dlq_bucket_name" {
+  description = "S3 bucket that receives individual documents rejected by the OpenSearch sink."
+  type        = string
+
+  validation {
+    condition     = length(var.sink_dlq_bucket_name) >= 3 && length(var.sink_dlq_bucket_name) <= 63 && can(regex("^[a-z0-9][a-z0-9.-]*[a-z0-9]$", var.sink_dlq_bucket_name))
+    error_message = "sink_dlq_bucket_name must be a valid 3-63 character S3 bucket name."
+  }
+}
+
+variable "sink_dlq_key_path_prefix" {
+  description = "S3 key prefix for OpenSearch sink document failures."
+  type        = string
+  default     = "failed-documents/"
+
+  validation {
+    condition     = length(var.sink_dlq_key_path_prefix) > 1 && endswith(var.sink_dlq_key_path_prefix, "/") && !startswith(var.sink_dlq_key_path_prefix, "/")
+    error_message = "sink_dlq_key_path_prefix must be relative and end with a slash."
   }
 }
 
@@ -132,15 +164,8 @@ variable "max_units" {
   }
 }
 
-variable "persistent_buffer_enabled" {
-  description = "Whether to enable OSIS persistent buffering in addition to the durable SQS boundary."
-  type        = bool
-  default     = false
-}
-
 variable "tags" {
   description = "Tags applied to the OpenSearch Ingestion pipeline."
   type        = map(string)
   default     = {}
 }
-

@@ -5,8 +5,7 @@ provider "aws" {
     tags = merge(var.tags, {
       Environment = var.environment
       ManagedBy   = "Terraform"
-      Repository  = "aws-log-platform-reference"
+      Repository  = "aws-log-platform"
     })
   }
 }
-

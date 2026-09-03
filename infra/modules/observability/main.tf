@@ -61,6 +61,44 @@ resource "aws_cloudwatch_metric_alarm" "s3_source_failures" {
   }
 }
 
+resource "aws_cloudwatch_metric_alarm" "s3_object_failures" {
+  alarm_name          = "${var.name_prefix}-osis-s3-object-failures"
+  alarm_description   = "OpenSearch Ingestion failed to read one or more canonical S3 objects."
+  namespace           = "AWS/OSIS"
+  metric_name         = "${var.sub_pipeline_name}.s3.s3ObjectsFailed.count"
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  datapoints_to_alarm = 1
+  comparison_operator = "GreaterThanThreshold"
+  threshold           = 0
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = var.alarm_action_arns
+
+  dimensions = {
+    PipelineName = var.pipeline_name
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "date_match_failures" {
+  alarm_name          = "${var.name_prefix}-osis-date-match-failures"
+  alarm_description   = "One or more structured records contained an unsupported event timestamp."
+  namespace           = "AWS/OSIS"
+  metric_name         = "${var.sub_pipeline_name}.date.dateProcessingMatchFailure.count"
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  datapoints_to_alarm = 1
+  comparison_operator = "GreaterThanThreshold"
+  threshold           = 0
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = var.alarm_action_arns
+
+  dimensions = {
+    PipelineName = var.pipeline_name
+  }
+}
+
 resource "aws_cloudwatch_metric_alarm" "sink_document_errors" {
   alarm_name          = "${var.name_prefix}-osis-document-errors"
   alarm_description   = "OpenSearch rejected one or more documents after ingestion retries."
@@ -80,3 +118,21 @@ resource "aws_cloudwatch_metric_alarm" "sink_document_errors" {
   }
 }
 
+resource "aws_cloudwatch_metric_alarm" "sink_dlq_write_failures" {
+  alarm_name          = "${var.name_prefix}-osis-sink-dlq-write-failures"
+  alarm_description   = "HIGH: OpenSearch rejected documents and OSIS also failed to preserve them in the S3 sink DLQ."
+  namespace           = "AWS/OSIS"
+  metric_name         = "${var.sub_pipeline_name}.opensearch.s3.dlqS3RecordsFailed.count"
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  datapoints_to_alarm = 1
+  comparison_operator = "GreaterThanThreshold"
+  threshold           = 0
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = var.alarm_action_arns
+
+  dimensions = {
+    PipelineName = var.pipeline_name
+  }
+}

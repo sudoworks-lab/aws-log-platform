@@ -10,10 +10,10 @@ security_group_ids = [
   "sg-0123456789abcdef0",
 ]
 
-reader_principal_arns = [
+reader_principals = [
   "arn:aws:iam::444455556666:role/example-prod-log-readers",
+  # "saml/444455556666/corporate-identity/group/ProdLogReaders",
 ]
 
 # Optional: connect alarms to an existing notification target.
 alarm_action_arns = []
-

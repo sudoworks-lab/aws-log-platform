@@ -56,6 +56,15 @@ resource "aws_opensearchserverless_access_policy" "data" {
       Principal   = [var.pipeline_role_arn]
       Rules = [
         {
+          Resource     = ["collection/${var.collection_name}"]
+          ResourceType = "collection"
+          Permission = [
+            "aoss:CreateCollectionItems",
+            "aoss:UpdateCollectionItems",
+            "aoss:DescribeCollectionItems",
+          ]
+        },
+        {
           Resource     = ["index/${var.collection_name}/*"]
           ResourceType = "index"
           Permission = [
@@ -69,7 +78,7 @@ resource "aws_opensearchserverless_access_policy" "data" {
     },
     {
       Description = "Investigation principals have read-only data access"
-      Principal   = sort(tolist(var.reader_principal_arns))
+      Principal   = sort(tolist(var.reader_principals))
       Rules = [
         {
           Resource     = ["collection/${var.collection_name}"]
@@ -89,17 +98,17 @@ resource "aws_opensearchserverless_access_policy" "data" {
   ])
 }
 
-resource "aws_opensearchserverless_lifecycle_policy" "hot" {
-  name        = "${var.collection_name}-hot"
+resource "aws_opensearchserverless_lifecycle_policy" "search" {
+  name        = "${var.collection_name}-retention"
   type        = "retention"
-  description = "Hot searchable retention for ${var.collection_name}"
+  description = "Minimum searchable index data retention for ${var.collection_name}"
 
   policy = jsonencode({
     Rules = [
       {
         Resource          = ["index/${var.collection_name}/*"]
         ResourceType      = "index"
-        MinIndexRetention = "${var.hot_retention_days}d"
+        MinIndexRetention = "${var.search_retention_days}d"
       }
     ]
   })
@@ -109,7 +118,7 @@ resource "aws_opensearchserverless_collection" "logs" {
   name             = var.collection_name
   type             = "TIMESERIES"
   standby_replicas = var.standby_replicas
-  description      = "Rebuildable hot log search tier; S3 is canonical"
+  description      = "Rebuildable log search projection; S3 is canonical"
   tags             = var.tags
 
   depends_on = [
@@ -118,4 +127,3 @@ resource "aws_opensearchserverless_collection" "logs" {
     aws_opensearchserverless_security_policy.search_network,
   ]
 }
-

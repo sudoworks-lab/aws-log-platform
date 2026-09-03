@@ -1,4 +1,44 @@
 locals {
+  index_template = {
+    template = {
+      mappings = {
+        dynamic = false
+        properties = {
+          "@timestamp" = { type = "date" }
+          timestamp    = { type = "date" }
+          ingested_at  = { type = "date" }
+          service      = { type = "keyword" }
+          environment  = { type = "keyword" }
+          level        = { type = "keyword" }
+          message      = { type = "text" }
+          trace_id     = { type = "keyword" }
+          tags         = { type = "keyword" }
+          http = {
+            properties = {
+              method      = { type = "keyword" }
+              route       = { type = "keyword" }
+              status_code = { type = "integer" }
+              duration_ms = { type = "long" }
+            }
+          }
+          error = {
+            properties = {
+              type      = { type = "keyword" }
+              retryable = { type = "boolean" }
+            }
+          }
+          log_platform = {
+            properties = {
+              environment  = { type = "keyword" }
+              ingested_by  = { type = "keyword" }
+              parse_status = { type = "keyword" }
+            }
+          }
+        }
+      }
+    }
+  }
+
   pipeline_configuration = {
     version = "2"
     (var.sub_pipeline_name) = {
@@ -11,8 +51,10 @@ locals {
           on_error                  = "retain_messages"
           codec                     = { newline = null }
           sqs = {
-            queue_url          = var.queue_url
-            visibility_timeout = "${var.queue_visibility_timeout_seconds}s"
+            queue_url                               = var.queue_url
+            visibility_timeout                      = "${var.queue_visibility_timeout_seconds}s"
+            visibility_duplication_protection       = true
+            visibility_duplicate_protection_timeout = "${var.visibility_duplicate_protection_timeout_seconds}s"
           }
           aws = {
             region       = var.region
@@ -23,14 +65,52 @@ locals {
       processor = [
         {
           parse_json = {
-            source        = "message"
-            delete_source = true
+            source                          = "message"
+            overwrite_if_destination_exists = true
+            delete_source                   = false
+            tags_on_failure                 = ["parse_json_failure"]
+          }
+        },
+        {
+          add_entries = {
+            entries = [
+              {
+                key                     = "log_platform/parse_status"
+                value                   = "parsed"
+                overwrite_if_key_exists = true
+              }
+            ]
+          }
+        },
+        {
+          add_entries = {
+            entries = [
+              {
+                key                     = "log_platform/parse_status"
+                value                   = "malformed_json"
+                overwrite_if_key_exists = true
+              }
+            ]
+            add_when = "hasTags(\"parse_json_failure\")"
+          }
+        },
+        {
+          date = {
+            match = [
+              {
+                key      = "timestamp"
+                patterns = ["yyyy-MM-dd'T'HH:mm:ss.SSSXXX"]
+              }
+            ]
+            destination   = "@timestamp"
+            output_format = "yyyy-MM-dd'T'HH:mm:ss.SSSXXX"
+            date_when     = "/timestamp != null"
           }
         },
         {
           date = {
             from_time_received = true
-            destination        = "@timestamp"
+            destination        = "ingested_at"
           }
         },
         {
@@ -53,14 +133,24 @@ locals {
       sink = [
         {
           opensearch = {
-            hosts = [var.collection_endpoint]
-            index = var.index_name
+            hosts            = [var.collection_endpoint]
+            index            = var.index_name
+            template_type    = "index-template"
+            template_content = jsonencode(local.index_template)
             aws = {
               region       = var.region
               sts_role_arn = var.pipeline_role_arn
               serverless   = true
               serverless_options = {
                 network_policy_name = var.network_policy_name
+              }
+            }
+            dlq = {
+              s3 = {
+                bucket          = var.sink_dlq_bucket_name
+                key_path_prefix = var.sink_dlq_key_path_prefix
+                region          = var.region
+                sts_role_arn    = var.pipeline_role_arn
               }
             }
           }
@@ -76,10 +166,6 @@ resource "aws_osis_pipeline" "logs" {
   pipeline_role_arn           = var.pipeline_role_arn
   min_units                   = var.min_units
   max_units                   = var.max_units
-
-  buffer_options {
-    persistent_buffer_enabled = var.persistent_buffer_enabled
-  }
 
   log_publishing_options {
     is_logging_enabled = true
@@ -103,4 +189,3 @@ resource "aws_osis_pipeline" "logs" {
     }
   }
 }
-

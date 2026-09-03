@@ -38,6 +38,26 @@ variable "queue_arn" {
   }
 }
 
+variable "sink_dlq_bucket_arn" {
+  description = "ARN of the S3 bucket receiving OpenSearch sink document failures."
+  type        = string
+
+  validation {
+    condition     = can(regex("^arn:[^:]+:s3:::[^/]+$", var.sink_dlq_bucket_arn))
+    error_message = "sink_dlq_bucket_arn must be an S3 bucket ARN."
+  }
+}
+
+variable "sink_dlq_key_path_prefix" {
+  description = "Only this S3 sink DLQ prefix can be written by the pipeline role."
+  type        = string
+
+  validation {
+    condition     = length(var.sink_dlq_key_path_prefix) > 1 && endswith(var.sink_dlq_key_path_prefix, "/") && !startswith(var.sink_dlq_key_path_prefix, "/")
+    error_message = "sink_dlq_key_path_prefix must be relative and end with a slash."
+  }
+}
+
 variable "collection_name" {
   description = "Exact OpenSearch Serverless collection name used in IAM conditions."
   type        = string
@@ -53,4 +73,3 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
-

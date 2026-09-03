@@ -81,6 +81,14 @@ data "aws_iam_policy_document" "pipeline" {
   }
 
   statement {
+    sid    = "WriteSinkDocumentFailures"
+    effect = "Allow"
+
+    actions   = ["s3:PutObject"]
+    resources = ["${var.sink_dlq_bucket_arn}/${var.sink_dlq_key_path_prefix}*"]
+  }
+
+  statement {
     sid    = "WriteTargetCollection"
     effect = "Allow"
 

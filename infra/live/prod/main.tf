@@ -5,8 +5,17 @@ locals {
   sub_pipeline_name = "${local.name_prefix}-logs"
   osis_network_name = "${local.name_prefix}-osis-net"
   archive_bucket    = "${var.project_name}-${var.environment}-${var.aws_account_id}-${var.aws_region}-raw"
+  sink_dlq_bucket   = "${var.project_name}-${var.environment}-${var.aws_account_id}-${var.aws_region}-sink-dlq"
+  sink_dlq_prefix   = "failed-documents/"
   ingestion_role    = "${local.name_prefix}-osis-pipeline"
   ingestion_queue   = "${local.name_prefix}-ingestion"
+}
+
+module "sink_dlq" {
+  source = "../../modules/sink_dlq"
+
+  bucket_name    = local.sink_dlq_bucket
+  retention_days = var.sink_dlq_retention_days
 }
 
 module "log_archive" {
@@ -43,11 +52,13 @@ resource "aws_s3_bucket_notification" "ingestion" {
 module "ingestion_identity" {
   source = "../../modules/ingestion_identity"
 
-  role_name             = local.ingestion_role
-  archive_bucket_arn    = module.log_archive.bucket_arn
-  archive_object_prefix = var.raw_log_prefix
-  queue_arn             = module.ingestion_queue.queue_arn
-  collection_name       = local.collection_name
+  role_name                = local.ingestion_role
+  archive_bucket_arn       = module.log_archive.bucket_arn
+  archive_object_prefix    = var.raw_log_prefix
+  queue_arn                = module.ingestion_queue.queue_arn
+  sink_dlq_bucket_arn      = module.sink_dlq.bucket_arn
+  sink_dlq_key_path_prefix = local.sink_dlq_prefix
+  collection_name          = local.collection_name
 }
 
 module "opensearch_serverless" {
@@ -55,11 +66,11 @@ module "opensearch_serverless" {
 
   collection_name       = local.collection_name
   pipeline_role_arn     = module.ingestion_identity.role_arn
-  reader_principal_arns = var.reader_principal_arns
+  reader_principals     = var.reader_principals
   vpc_id                = var.vpc_id
   subnet_ids            = var.subnet_ids
   security_group_ids    = var.security_group_ids
-  hot_retention_days    = var.hot_retention_days
+  search_retention_days = var.search_retention_days
   standby_replicas      = "ENABLED"
 }
 
@@ -88,7 +99,9 @@ module "opensearch_ingestion" {
   pipeline_role_arn                = module.ingestion_identity.role_arn
   collection_endpoint              = module.opensearch_serverless.collection_endpoint
   network_policy_name              = local.osis_network_name
+  sink_dlq_bucket_name             = module.sink_dlq.bucket_id
+  sink_dlq_key_path_prefix         = local.sink_dlq_prefix
   cloudwatch_log_group_name        = module.observability.pipeline_log_group_name
-  min_units                        = 1
+  min_units                        = 2
   max_units                        = 4
 }

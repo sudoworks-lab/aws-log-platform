@@ -9,7 +9,9 @@ output "alarm_names" {
     aws_cloudwatch_metric_alarm.queue_age.alarm_name,
     aws_cloudwatch_metric_alarm.dlq_visible.alarm_name,
     aws_cloudwatch_metric_alarm.s3_source_failures.alarm_name,
+    aws_cloudwatch_metric_alarm.s3_object_failures.alarm_name,
+    aws_cloudwatch_metric_alarm.date_match_failures.alarm_name,
     aws_cloudwatch_metric_alarm.sink_document_errors.alarm_name,
+    aws_cloudwatch_metric_alarm.sink_dlq_write_failures.alarm_name,
   ]
 }
-

@@ -18,13 +18,17 @@ variable "pipeline_role_arn" {
   }
 }
 
-variable "reader_principal_arns" {
-  description = "IAM or SAML principal ARNs granted read-only collection/index data access."
+variable "reader_principals" {
+  description = "IAM role/user ARNs or OpenSearch Serverless SAML identities granted read-only data access."
   type        = set(string)
 
   validation {
-    condition     = length(var.reader_principal_arns) > 0 && alltrue([for arn in var.reader_principal_arns : can(regex("^arn:[^:]+:(iam|aoss):", arn))])
-    error_message = "At least one IAM or OpenSearch Serverless SAML reader principal ARN is required."
+    condition = length(var.reader_principals) > 0 && alltrue([
+      for principal in var.reader_principals :
+      can(regex("^arn:[^:]+:iam::${try(split(":", var.pipeline_role_arn)[4], "")}:(role|user)/.+$", principal)) ||
+      can(regex("^saml/${try(split(":", var.pipeline_role_arn)[4], "")}/[^/]+/(user|group)/.+$", principal))
+    ])
+    error_message = "Each reader principal must be an IAM role/user ARN or an AOSS SAML user/group identity in the collection account."
   }
 }
 
@@ -58,14 +62,14 @@ variable "security_group_ids" {
   }
 }
 
-variable "hot_retention_days" {
-  description = "Minimum hot document retention in the time-series collection."
+variable "search_retention_days" {
+  description = "Minimum index data retention in the time-series search collection."
   type        = number
   default     = 30
 
   validation {
-    condition     = var.hot_retention_days >= 1 && var.hot_retention_days <= 3650 && floor(var.hot_retention_days) == var.hot_retention_days
-    error_message = "hot_retention_days must be a whole number from 1 through 3650."
+    condition     = var.search_retention_days >= 1 && var.search_retention_days <= 3650 && floor(var.search_retention_days) == var.search_retention_days
+    error_message = "search_retention_days must be a whole number from 1 through 3650."
   }
 }
 
@@ -85,4 +89,3 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
-
