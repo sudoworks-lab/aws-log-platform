@@ -1,0 +1,30 @@
+output "raw_archive_bucket" {
+  description = "Canonical raw log archive bucket name."
+  value       = module.log_archive.bucket_id
+}
+
+output "ingestion_queue_url" {
+  description = "SQS ingestion queue URL."
+  value       = module.ingestion_queue.queue_url
+}
+
+output "ingestion_dlq_arn" {
+  description = "SQS dead-letter queue ARN."
+  value       = module.ingestion_queue.dlq_arn
+}
+
+output "opensearch_collection_endpoint" {
+  description = "Private OpenSearch Serverless collection endpoint."
+  value       = module.opensearch_serverless.collection_endpoint
+}
+
+output "opensearch_dashboard_endpoint" {
+  description = "Private OpenSearch Dashboards endpoint."
+  value       = module.opensearch_serverless.dashboard_endpoint
+}
+
+output "ingestion_pipeline_arn" {
+  description = "OpenSearch Ingestion pipeline ARN."
+  value       = module.opensearch_ingestion.pipeline_arn
+}
+

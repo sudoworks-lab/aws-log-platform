@@ -1,0 +1,16 @@
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfplan
+*.auto.tfvars
+*.auto.tfvars.json
+terraform.tfvars
+backend.hcl
+.tflint.d/
+
+# Root dependency locks are committed after a deliberate provider resolution.
+# Module-local lock files produced by ad-hoc init are not repository artifacts.
+infra/modules/**/.terraform.lock.hcl
+

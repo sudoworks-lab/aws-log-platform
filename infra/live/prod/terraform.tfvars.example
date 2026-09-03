@@ -1,0 +1,19 @@
+aws_account_id = "444455556666"
+vpc_id         = "vpc-0123456789abcdef0"
+
+subnet_ids = [
+  "subnet-0123456789abcdef0",
+  "subnet-0fedcba9876543210",
+]
+
+security_group_ids = [
+  "sg-0123456789abcdef0",
+]
+
+reader_principal_arns = [
+  "arn:aws:iam::444455556666:role/example-prod-log-readers",
+]
+
+# Optional: connect alarms to an existing notification target.
+alarm_action_arns = []
+

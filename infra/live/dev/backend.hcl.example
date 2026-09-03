@@ -1,0 +1,7 @@
+# Create and secure this bucket outside this reference repository.
+bucket       = "replace-with-dev-terraform-state-bucket"
+key          = "aws-log-platform-reference/dev/terraform.tfstate"
+region       = "ap-northeast-1"
+encrypt      = true
+use_lockfile = true
+
