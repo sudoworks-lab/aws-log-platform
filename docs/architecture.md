@@ -19,7 +19,7 @@ The architecture does not provision these adapters. Each adapter must write the 
 2. S3 sends an `ObjectCreated` notification to the standard SQS ingestion queue.
 3. OSIS polls SQS, reads the referenced S3 object, decompresses it when necessary, and splits it by newline.
 4. The pipeline records source-received time as `ingested_at`, parses each line, derives `@timestamp` from the required occurrence-time `timestamp`, and adds `log_platform` metadata.
-5. The OpenSearch sink applies the core index template and writes documents to an AOSS time-series collection. Individual documents that exhaust sink handling go to the S3 sink DLQ.
+5. Terraform creates the AOSS `logs` index with its core mapping before the OSIS pipeline. The OpenSearch sink runs with index management disabled and writes documents to that existing index. Individual documents that exhaust sink handling go to the S3 sink DLQ.
 6. End-to-end acknowledgement deletes the SQS message only after sink acknowledgement. The source never deletes the canonical S3 object.
 
 S3 notifications and SQS standard queues are at-least-once. The source does not rely only on a fixed visibility timeout: visibility duplication protection extends visibility, up to the configured two-hour limit, while a message remains in flight. This reduces duplicate consumers during long object handling but does not provide exact de-duplication. Consumers and investigations must tolerate duplicates.
@@ -40,9 +40,9 @@ JSON outcomes are explicit:
 
 A syntactically valid event with a missing or invalid `timestamp` violates the producer contract. It must be investigated as a schema failure; processing time must not be relabeled as event occurrence time.
 
-## Core index template
+## AOSS index schema
 
-The core index template sets `dynamic: false` at the mapping root and explicitly lists fields under the `http`, `error`, and `log_platform` objects. `_source` remains enabled. The searchable mapping is deliberately limited to:
+The Terraform-managed AOSS `logs` index sets `dynamic: false` at the mapping root and explicitly lists fields under the `http`, `error`, and `log_platform` objects. `_source` remains enabled. Ingestion runtime and schema lifecycle are deliberately separated: OSIS uses `index_type: management_disabled` and does not carry `template_type` or `template_content`. The searchable mapping is deliberately limited to:
 
 | Field | Mapping | Meaning |
 | --- | --- | --- |
@@ -57,8 +57,8 @@ The core index template sets `dynamic: false` at the mapping root and explicitly
 | `tags` | `keyword` | Processor tags, including the JSON parse-failure tag |
 | `http.method` | `keyword` | HTTP method |
 | `http.route` | `keyword` | Normalized route |
-| `http.status_code` | `integer` | HTTP response status |
-| `http.duration_ms` | `long` | HTTP duration in milliseconds |
+| `http.status_code` | `integer`, `coerce: false` | HTTP response status encoded as a JSON number |
+| `http.duration_ms` | `long`, `coerce: false` | HTTP duration in milliseconds encoded as a JSON number |
 | `error.type` | `keyword` | Error classification |
 | `error.retryable` | `boolean` | Whether the producer considers the error retryable |
 | `log_platform.environment` | `keyword` | Platform-owned environment marker |
@@ -67,7 +67,9 @@ The core index template sets `dynamic: false` at the mapping root and explicitly
 
 Unknown root or object fields remain in `_source` but are not indexed because dynamic mapping is disabled. Making an unknown field searchable requires schema review, an explicit mapping update, and replay or reindexing where historical search is required.
 
-The ingestion principal receives collection-level `aoss:CreateCollectionItems`, `aoss:UpdateCollectionItems`, and `aoss:DescribeCollectionItems` so it can create, update, and describe index templates. It does not receive `aoss:DeleteCollectionItems`. Index-level create, update, describe, and write permissions remain separate and exclude index and document deletion.
+Numeric-looking strings are schema violations rather than implicit conversions. A document rejected for a strict numeric mapping is isolated in the S3 sink DLQ while the canonical raw object remains in S3.
+
+The Terraform index manager receives create, update, describe, and delete lifecycle permissions only for `logs`; delete is required for Terraform destroy. The OSIS principal receives AWS's documented ingestion minimum of `aoss:CreateIndex`, `aoss:UpdateIndex`, `aoss:DescribeIndex`, and `aoss:WriteDocument`, restricted to that exact pre-created index. The pipeline configuration still uses `management_disabled`, so Terraform remains the schema owner. OSIS receives no collection-item template permissions and no index or document delete permissions.
 
 ## Failure boundaries
 
@@ -89,9 +91,9 @@ Failure to write a failed individual document to the S3 sink DLQ is high severit
 | Producer adapter | batching, object naming, required timestamp and NDJSON schema, successful S3 write | search availability |
 | S3 raw archive | canonical raw retention, encryption, lifecycle, object versions | parsing or indexing |
 | SQS and source DLQ | burst absorption, retry visibility, object/event redrive | canonical log contents or individual sink failures |
-| OSIS | polling, visibility extension, decompression, parsing runtime, sink retries and sink-DLQ delivery | canonical retention or schema governance |
-| AOSS | bounded search capacity and index storage | the only copy of a log |
-| Platform operations | schema, index template, access, alarms, replay, capacity and cost review | application instrumentation |
+| OSIS | polling, visibility extension, decompression, parsing runtime, writes to the existing index, sink retries and sink-DLQ delivery | canonical retention or index/schema lifecycle |
+| AOSS | bounded search capacity and Terraform-managed index storage | the only copy of a log |
+| Platform operations | index schema, access, alarms, replay, capacity and cost review | application instrumentation |
 
 ## Network model
 
@@ -99,12 +101,17 @@ Search and Dashboards are reachable only through an AOSS-managed VPC endpoint su
 
 OSIS creates a service-managed PrivateLink endpoint to a private Serverless collection. AWS requires the pipeline to name a network policy that it can create or update with that endpoint. To avoid competing owners of the same JSON policy, the ingestion policy name is reserved for OSIS and is not also managed by an `aws_opensearchserverless_security_policy` resource. The human/search VPC policy remains Terraform-managed.
 
+The AWS Cloud Control `awscc_opensearchserverless_collection_index` lifecycle has a measured network boundary: Create and Delete return `AccessDenied` when the collection is private-only. `provisioning_public_access_enabled` therefore controls a separate, default-off network policy used only for index lifecycle phases. When enabled, that policy has one `collection` rule for `collection/<exact-name>` and `AllowFromPublic = true`; it has no Dashboards rule, source-service expansion, IAM change, or data-access-policy change.
+
+The Terraform graph orders encryption, data access, the private search network, and collection before the optional provisioning policy, and orders the managed index after that policy node. With the variable false, the policy has zero instances and the existing index remains managed in the canonical private configuration. With it true, index Create or Update waits for the temporary policy. Destroy reverses the dependency: the index is deleted before the temporary policy, while the exception is still present.
+
 ## Lifecycle model
 
 The archive and search projection have independent lifecycles:
 
 - S3 transitions raw objects from Standard to Standard-IA and then Deep Archive. Expiration is off by default.
 - `search_retention_days` configures the minimum AOSS time-series retention period. This retention policy does not expose or control hot/warm placement.
+- The public provisioning policy is not a lifecycle state to retain. Every successful create/update workflow ends with `provisioning_public_access_enabled = false`; a remaining exception is a steady-state violation.
 - Rehydration restores archived S3 objects when required, then republishes object events or a controlled replay manifest to a queue.
 
 ## Capacity and buffering
@@ -119,9 +126,11 @@ Modules represent a lifecycle, owner, security boundary, or reuse point:
 
 - `log_archive`: canonical raw bucket and archive controls.
 - `ingestion_queue`: ingestion queue, SQS source DLQ, encryption, redrive, and S3 sender policy.
-- `ingestion_identity`: the OSIS role joining source, S3 sink DLQ, template, and index permission boundaries.
-- `opensearch_serverless`: collection, encryption, private search network, data access, and search retention.
-- `opensearch_ingestion`: pipeline configuration, visibility protection, parsing, core template, S3 sink DLQ, and managed runtime.
+- `ingestion_identity`: the OSIS role joining source, S3 sink DLQ, private connectivity, and index-write permission boundaries.
+- `opensearch_serverless`: collection, Terraform-managed `logs` index and mapping, encryption, private search network, data access, and search retention.
+- `opensearch_ingestion`: pipeline configuration, visibility protection, parsing, S3 sink DLQ, and managed runtime with index management disabled.
 - `observability`: pipeline log destination and alarms based only on documented AWS metric names.
 
 The separate identity module avoids a dependency cycle between the collection data policy and the pipeline while keeping IAM consistent across environment roots.
+
+The live roots pass the AOSS index resource's name into the ingestion module. That resource reference guarantees the order collection, then `logs` index with strict mapping, then OSIS pipeline, so the first document cannot create a dynamically mapped index ahead of Terraform.

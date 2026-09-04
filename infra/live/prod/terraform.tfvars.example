@@ -1,6 +1,11 @@
 aws_account_id = "444455556666"
 vpc_id         = "vpc-0123456789abcdef0"
 
+index_manager_principal_arn = "arn:aws:iam::444455556666:role/example-prod-terraform-deployer"
+
+# Temporary AWSCC index lifecycle phase only; false is the required steady state.
+provisioning_public_access_enabled = false
+
 subnet_ids = [
   "subnet-0123456789abcdef0",
   "subnet-0fedcba9876543210",

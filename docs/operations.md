@@ -33,6 +33,33 @@ Development starts at 1 ingestion OCU to reduce cost. Production requires a mini
 
 The persistent buffer is not configured because S3 plus SQS are the durability boundary; OSIS uses its default in-memory buffer. Enabling persistent buffering later requires a reviewed OCU, KMS, recovery, and cost design.
 
+## AOSS index lifecycle procedure
+
+Private-only is the canonical steady state, expressed by `provisioning_public_access_enabled = false` in both live roots and their example tfvars. The temporary exception is necessary only for the Terraform-managed AWSCC index lifecycle. It exposes the exact collection at the network layer, never Dashboards, and does not change IAM or AOSS data access authorization.
+
+Initialize the explicitly selected live root with its intended backend before using the helper. The helper does not initialize or reconfigure a backend, so existing backend and state boundaries remain intact. Pass shared Terraform options after `--` using `-option=value` form; for example:
+
+```bash
+terraform -chdir=infra/live/dev init -backend-config=backend.hcl
+./scripts/aoss-index-lifecycle.sh apply --root infra/live/dev -- -var-file=terraform.tfvars
+```
+
+The `apply` mode is the canonical Create/Update sequence:
+
+1. Apply with `provisioning_public_access_enabled = true`. Terraform creates the exact-collection public policy before creating or updating the AWSCC index.
+2. Only if phase 1 succeeds, apply the same configuration and caller options with `provisioning_public_access_enabled = false`.
+3. Confirm the helper reports private-only steady state. The root output `aoss_provisioning_public_access_enabled` must be `false`; `aoss_provisioning_public_policy_name` reports the reserved policy name for investigation.
+
+The `destroy` mode is the canonical deletion sequence:
+
+```bash
+./scripts/aoss-index-lifecycle.sh destroy --root infra/live/dev -- -var-file=terraform.tfvars
+```
+
+It first applies with the provisioning switch true. Only after that succeeds does it run Terraform destroy with the same true value, so the AWSCC index Delete completes before Terraform removes the temporary policy. Do not make a direct destroy with the false steady-state value the canonical procedure.
+
+The helper uses `set -euo pipefail` and does not continue after a failed phase. It rejects caller overrides of the provisioning variable, targeted operations, saved plans, and refresh-only/destroy flags that could break the two-phase guarantee. It logs phase names but not caller arguments. If the second apply fails, the public exception may remain: correct the failure and rerun `apply`. If destroy fails, retry `destroy` with the helper, or run `apply` to return to private steady state if destruction is abandoned. Any temporary exception left in place outside an active lifecycle operation is a steady-state violation.
+
 ## Failure model A–H
 
 ### A. raw archive loss
@@ -65,13 +92,13 @@ For malformed JSON, the event continues downstream with the original line in `me
 
 Every valid event requires an ISO-8601 `timestamp` with milliseconds and a timezone. `timestamp` and `@timestamp` are occurrence time; `ingested_at` is source-received or processing time. Do not substitute `ingested_at` when occurrence time is missing or invalid. Investigate date-match failures and any resulting sink-DLQ records before replay.
 
-Unknown fields remain in `_source` under the core `dynamic: false` mapping but are not searchable. A request to search an unknown field requires schema review, an explicit template update, and replay or reindexing if historical search is required.
+Unknown fields remain in `_source` under the core `dynamic: false` mapping but are not searchable. A request to search an unknown field requires schema review, an explicit Terraform-managed index mapping update, and replay or reindexing if historical search is required.
 
 ### D. OpenSearch sink rejected document -> S3 sink DLQ
 
 **Classification:** an individual document is not searchable; raw data remains in S3 and the rejection is preserved in the S3 sink DLQ.
 
-`<sub-pipeline>.opensearch.documentErrors.count` identifies documents that the OpenSearch sink could not send after its handling. These individual failures go to the S3 sink DLQ, not the SQS source DLQ. Inspect the rejection status, mapping compatibility, template permissions, sink-DLQ record, and canonical source line. Correct the cause and replay a bounded document or source-object set.
+`<sub-pipeline>.opensearch.documentErrors.count` identifies documents that the OpenSearch sink could not send after its handling. These individual failures go to the S3 sink DLQ, not the SQS source DLQ. Inspect the rejection status, mapping compatibility, index permissions, sink-DLQ record, and canonical source line. Correct the cause and replay a bounded document or source-object set.
 
 Once a rejected document is preserved in the S3 sink DLQ, end-to-end acknowledgement can complete for that failure instead of permanently replaying the entire source object because of one poison document.
 
@@ -93,7 +120,7 @@ Investigate AOSS collection state, the private network policy, data access polic
 
 **Classification:** search unavailable for the deleted range; raw data remains in S3.
 
-Stop uncontrolled replay, restore the core index template, define the affected S3 key and time range, and replay through a separate bounded queue or reviewed scan. Expect duplicates because the search projection is at-least-once. Validate document counts, occurrence-time ranges, malformed-record markers, and representative queries before declaring the search projection rebuilt.
+Stop uncontrolled replay, restore the Terraform-managed `logs` index and mapping, define the affected S3 key and time range, and replay through a separate bounded queue or reviewed scan. Expect duplicates because the search projection is at-least-once. Validate document counts, occurrence-time ranges, malformed-record markers, and representative queries before declaring the search projection rebuilt.
 
 ### H. archive restore/replay
 

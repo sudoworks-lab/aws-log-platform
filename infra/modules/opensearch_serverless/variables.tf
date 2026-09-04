@@ -18,6 +18,33 @@ variable "pipeline_role_arn" {
   }
 }
 
+variable "index_manager_principal_arn" {
+  description = "IAM role or user ARN used by Terraform to create and update the managed index."
+  type        = string
+
+  validation {
+    condition     = can(regex("^arn:[^:]+:iam::${try(split(":", var.pipeline_role_arn)[4], "")}:(role|user)/.+$", var.index_manager_principal_arn))
+    error_message = "index_manager_principal_arn must be an IAM role or user ARN in the collection account."
+  }
+}
+
+variable "index_name" {
+  description = "Terraform-managed index name for the rebuildable log search projection."
+  type        = string
+  default     = "logs"
+
+  validation {
+    condition     = length(var.index_name) <= 255 && can(regex("^[a-z][a-z0-9_-]*$", var.index_name))
+    error_message = "index_name must start with a lowercase letter and contain only lowercase letters, digits, underscores, or hyphens."
+  }
+}
+
+variable "provisioning_public_access_enabled" {
+  description = "Whether to create the temporary exact-collection public network policy required for AWSCC index lifecycle operations. Must be false in steady state."
+  type        = bool
+  default     = false
+}
+
 variable "reader_principals" {
   description = "IAM role/user ARNs or OpenSearch Serverless SAML identities granted read-only data access."
   type        = set(string)

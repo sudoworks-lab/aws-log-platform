@@ -106,8 +106,9 @@ data "aws_iam_policy_document" "pipeline" {
     sid    = "ManageOSISPrivateLinkNetworkPolicy"
     effect = "Allow"
 
-    # These control-plane APIs do not support resource ARNs. The collection
-    # condition and exact action list are the available least-privilege bounds.
+    # These control-plane APIs do not support resource ARNs. OSIS calls them
+    # without usable collection condition context while validating the sink,
+    # so the exact action list is the available least-privilege bound.
     actions = [
       "aoss:BatchGetCollection",
       "aoss:CreateSecurityPolicy",
@@ -116,12 +117,6 @@ data "aws_iam_policy_document" "pipeline" {
     ]
 
     resources = ["*"]
-
-    condition {
-      test     = "StringEquals"
-      variable = "aoss:collection"
-      values   = [var.collection_name]
-    }
   }
 }
 

@@ -64,14 +64,16 @@ module "ingestion_identity" {
 module "opensearch_serverless" {
   source = "../../modules/opensearch_serverless"
 
-  collection_name       = local.collection_name
-  pipeline_role_arn     = module.ingestion_identity.role_arn
-  reader_principals     = var.reader_principals
-  vpc_id                = var.vpc_id
-  subnet_ids            = var.subnet_ids
-  security_group_ids    = var.security_group_ids
-  search_retention_days = var.search_retention_days
-  standby_replicas      = "ENABLED"
+  collection_name                    = local.collection_name
+  pipeline_role_arn                  = module.ingestion_identity.role_arn
+  index_manager_principal_arn        = var.index_manager_principal_arn
+  provisioning_public_access_enabled = var.provisioning_public_access_enabled
+  reader_principals                  = var.reader_principals
+  vpc_id                             = var.vpc_id
+  subnet_ids                         = var.subnet_ids
+  security_group_ids                 = var.security_group_ids
+  search_retention_days              = var.search_retention_days
+  standby_replicas                   = "ENABLED"
 }
 
 module "observability" {
@@ -98,6 +100,7 @@ module "opensearch_ingestion" {
   queue_visibility_timeout_seconds = var.queue_visibility_timeout_seconds
   pipeline_role_arn                = module.ingestion_identity.role_arn
   collection_endpoint              = module.opensearch_serverless.collection_endpoint
+  index_name                       = module.opensearch_serverless.index_name
   network_policy_name              = local.osis_network_name
   sink_dlq_bucket_name             = module.sink_dlq.bucket_id
   sink_dlq_key_path_prefix         = local.sink_dlq_prefix

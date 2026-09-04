@@ -16,6 +16,10 @@ The user/search path is private. Terraform creates an AOSS-managed VPC endpoint 
 
 The ingestion-to-collection path uses OSIS-managed PrivateLink behavior. OSIS creates or updates the named ingestion network policy with its generated endpoint. That policy name remains separate from the Terraform-managed user network policy to prevent competing owners of the same JSON policy document.
 
+Private-only is the mandatory steady state. The default-off `provisioning_public_access_enabled` switch exists solely because the AWS Cloud Control index resource cannot Create or Delete an index against the measured private-only collection. During a documented lifecycle phase, it creates one temporary public network policy with one collection rule for the exact configured collection. It does not add a Dashboards rule and does not widen the private search policy, IAM identity policy, or AOSS data access policy.
+
+Public network reachability is not an authorization bypass. The AOSS data access policy remains active throughout the temporary phase and continues to limit the Terraform index manager, OSIS writer, and readers to their existing actions and resources. The lifecycle helper must remove the exception after a successful create/update. For destroy, it keeps the exception until Terraform has deleted the index and then destroys the policy itself. If the exception remains after an interrupted operation, treat it as a steady-state violation and either finish the helper workflow or explicitly return to the false phase.
+
 ## Reader identities
 
 `reader_principals` accepts principals in the forms supported by AOSS data access policies:
@@ -34,13 +38,9 @@ AOSS requires both authorization layers:
 1. IAM identity permissions allow IAM principals to call the collection APIs (`aoss:APIAccessAll`, and `aoss:DashboardsAccessAll` for Dashboards). SAML identities are authorized through the AOSS SAML provider and data access policy instead of IAM identity policies.
 2. The AOSS data access policy limits collection and index operations.
 
-The ingestion principal's collection rule supports index-template operations with only:
+Terraform, not OSIS, owns the AOSS `logs` index and its mapping. The configured Terraform index-manager principal receives `aoss:CreateIndex`, `aoss:UpdateIndex`, `aoss:DescribeIndex`, and `aoss:DeleteIndex` only for that exact index. Delete is included so an authorized Terraform destroy can remove the managed resource. The principal running Terraform also requires IAM `aoss:APIAccessAll`; this identity permission is intentionally owned outside the module.
 
-- `aoss:CreateCollectionItems`
-- `aoss:UpdateCollectionItems`
-- `aoss:DescribeCollectionItems`
-
-It does not grant `aoss:DeleteCollectionItems`. Its index rule grants only `aoss:CreateIndex`, `aoss:UpdateIndex`, `aoss:DescribeIndex`, and `aoss:WriteDocument`; index and document deletion remain excluded.
+The OSIS principal's data access rule grants AWS's documented ingestion minimum of `aoss:CreateIndex`, `aoss:UpdateIndex`, `aoss:DescribeIndex`, and `aoss:WriteDocument`, restricted to the exact pre-created `logs` index. The sink uses `management_disabled`, so OSIS does not own the index schema even though the service integration retains those documented data-plane actions. It receives no collection-level template, read, or delete permission.
 
 Reader principals receive collection describe plus index describe/read permissions, not write or delete. IAM policies for human or federated IAM roles and users remain owned by the identity platform.
 
@@ -57,7 +57,7 @@ Visibility duplication protection depends on `sqs:ChangeMessageVisibility`: whil
 
 ## IAM wildcard exceptions
 
-One ingestion-role statement uses `Resource = "*"` for AOSS control-plane operations used to discover the collection and create or update the OSIS-managed network policy. AWS does not expose resource ARNs for these security-policy create/get/update operations. The statement must remain restricted to the exact action list and an `aoss:collection` condition matching one collection name.
+One ingestion-role statement uses `Resource = "*"` for AOSS control-plane operations used to discover the collection and create or update the OSIS-managed network policy. AWS does not expose resource ARNs for these operations, and OSIS calls them without usable `aoss:collection` condition context while validating the sink. The statement must therefore remain restricted to the exact required action list. Collection data access remains independently restricted by the scoped `aoss:APIAccessAll` statement and the AOSS data access policy.
 
 The `aoss:APIAccessAll` statement uses an ARN limited to the queue's partition, Region, account, and a collection-ID wildcard, plus the exact collection-name condition. The collection ID is not known without creating a module cycle. The AOSS data access policy independently restricts the role to the target collection and index pattern. An authorized deployment review must confirm condition behavior in the target partition and provider version.
 

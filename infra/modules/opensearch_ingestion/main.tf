@@ -1,44 +1,4 @@
 locals {
-  index_template = {
-    template = {
-      mappings = {
-        dynamic = false
-        properties = {
-          "@timestamp" = { type = "date" }
-          timestamp    = { type = "date" }
-          ingested_at  = { type = "date" }
-          service      = { type = "keyword" }
-          environment  = { type = "keyword" }
-          level        = { type = "keyword" }
-          message      = { type = "text" }
-          trace_id     = { type = "keyword" }
-          tags         = { type = "keyword" }
-          http = {
-            properties = {
-              method      = { type = "keyword" }
-              route       = { type = "keyword" }
-              status_code = { type = "integer" }
-              duration_ms = { type = "long" }
-            }
-          }
-          error = {
-            properties = {
-              type      = { type = "keyword" }
-              retryable = { type = "boolean" }
-            }
-          }
-          log_platform = {
-            properties = {
-              environment  = { type = "keyword" }
-              ingested_by  = { type = "keyword" }
-              parse_status = { type = "keyword" }
-            }
-          }
-        }
-      }
-    }
-  }
-
   pipeline_configuration = {
     version = "2"
     (var.sub_pipeline_name) = {
@@ -89,9 +49,9 @@ locals {
                 key                     = "log_platform/parse_status"
                 value                   = "malformed_json"
                 overwrite_if_key_exists = true
+                add_when                = "hasTags(\"parse_json_failure\")"
               }
             ]
-            add_when = "hasTags(\"parse_json_failure\")"
           }
         },
         {
@@ -133,10 +93,9 @@ locals {
       sink = [
         {
           opensearch = {
-            hosts            = [var.collection_endpoint]
-            index            = var.index_name
-            template_type    = "index-template"
-            template_content = jsonencode(local.index_template)
+            hosts      = [var.collection_endpoint]
+            index      = var.index_name
+            index_type = "management_disabled"
             aws = {
               region       = var.region
               sts_role_arn = var.pipeline_role_arn

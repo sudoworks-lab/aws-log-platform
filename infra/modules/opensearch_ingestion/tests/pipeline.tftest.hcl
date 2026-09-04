@@ -50,7 +50,7 @@ run "renders_durable_s3_source_contract" {
     condition = (
       yamldecode(output.pipeline_configuration_yaml)["platform-logs"].processor[1].add_entries.entries[0].key == "log_platform/parse_status" &&
       yamldecode(output.pipeline_configuration_yaml)["platform-logs"].processor[1].add_entries.entries[0].value == "parsed" &&
-      yamldecode(output.pipeline_configuration_yaml)["platform-logs"].processor[2].add_entries.add_when == "hasTags(\"parse_json_failure\")" &&
+      yamldecode(output.pipeline_configuration_yaml)["platform-logs"].processor[2].add_entries.entries[0].add_when == "hasTags(\"parse_json_failure\")" &&
       yamldecode(output.pipeline_configuration_yaml)["platform-logs"].processor[2].add_entries.entries[0].key == "log_platform/parse_status" &&
       yamldecode(output.pipeline_configuration_yaml)["platform-logs"].processor[2].add_entries.entries[0].value == "malformed_json"
     )
@@ -100,22 +100,21 @@ run "renders_durable_s3_source_contract" {
   }
 
   assert {
+    condition     = yamldecode(output.pipeline_configuration_yaml)["platform-logs"].sink[0].opensearch.index_type == "management_disabled"
+    error_message = "The Serverless sink must explicitly disable index and template management."
+  }
+
+  assert {
     condition = (
-      jsondecode(yamldecode(output.pipeline_configuration_yaml)["platform-logs"].sink[0].opensearch.template_content).template.mappings.properties["@timestamp"].type == "date" &&
-      jsondecode(yamldecode(output.pipeline_configuration_yaml)["platform-logs"].sink[0].opensearch.template_content).template.mappings.properties.ingested_at.type == "date" &&
-      jsondecode(yamldecode(output.pipeline_configuration_yaml)["platform-logs"].sink[0].opensearch.template_content).template.mappings.properties.http.properties.status_code.type == "integer"
+      !contains(keys(yamldecode(output.pipeline_configuration_yaml)["platform-logs"].sink[0].opensearch), "template_type") &&
+      !contains(keys(yamldecode(output.pipeline_configuration_yaml)["platform-logs"].sink[0].opensearch), "template_content")
     )
-    error_message = "The core index template must render event, ingestion, and nested HTTP mappings."
+    error_message = "The OSIS sink must not own index templates or mappings."
   }
 
   assert {
-    condition     = !contains(keys(yamldecode(output.pipeline_configuration_yaml)["platform-logs"].sink[0].opensearch), "index_type")
-    error_message = "A Serverless sink that manages an index template must omit index_type to satisfy OSIS validation."
-  }
-
-  assert {
-    condition     = jsondecode(yamldecode(output.pipeline_configuration_yaml)["platform-logs"].sink[0].opensearch.template_content).template.mappings.dynamic == false
-    error_message = "Unknown fields must remain in _source without dynamic mapping expansion."
+    condition     = yamldecode(output.pipeline_configuration_yaml)["platform-logs"].sink[0].opensearch.index == "logs"
+    error_message = "The sink must write only to the pre-created logs index."
   }
 
   assert {

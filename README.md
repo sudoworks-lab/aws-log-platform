@@ -6,7 +6,7 @@ AWS Log Platform keeps raw logs in Amazon S3, sends S3 object notifications thro
 
 Durable evidence and search availability are separate concerns. Losing or being unable to recover a canonical S3 object is a raw-loss incident. Losing an index, delaying ingestion, or making AOSS unavailable is a search incident; rebuild the projection from retained S3 objects.
 
-Managed ingestion narrows the runtime responsibilities owned by the platform team. AWS operates the OSIS service runtime. Platform owners still own the producer contract, schema and index template, S3 and search retention, access policies, monitoring, replay, capacity and cost settings, and failure handling.
+Managed ingestion narrows the runtime responsibilities owned by the platform team. AWS operates the OSIS service runtime. Platform owners still own the producer contract, Terraform-managed AOSS index and schema, S3 and search retention, access policies, monitoring, replay, capacity and cost settings, and failure handling.
 
 ## Architecture
 
@@ -38,7 +38,7 @@ Each NDJSON line must be a JSON object with `timestamp` in ISO-8601 form with mi
 
 On a successful JSON parse, the indexed `message` is the application's message from the JSON object. On malformed JSON, processing continues, `message` retains the raw line, and `log_platform.parse_status` marks the document as `malformed_json`. Successfully parsed events do not receive that failure marker. A malformed event does not receive a fabricated occurrence timestamp.
 
-The core index template uses `dynamic: false` and explicitly maps the supported root fields and the `http`, `error`, and `log_platform` objects. Unknown fields remain available in `_source`, but are not searchable until schema review adds an explicit mapping. See [architecture.md](docs/architecture.md) for the field list.
+The Terraform-managed `logs` index uses `dynamic: false` and explicitly maps the supported root fields and the `http`, `error`, and `log_platform` objects. Unknown fields remain available in `_source`, but are not searchable until schema review adds an explicit mapping. Numeric fields must be encoded as JSON numbers; numeric-looking strings violate the schema and rejected documents are isolated in the S3 sink DLQ. See [architecture.md](docs/architecture.md) for the field list.
 
 ## Data lifecycle and capacity
 
@@ -62,14 +62,17 @@ Terraform workspaces remain useful for light variations of the same environment.
 
 Remote state uses a partial `backend "s3" {}` configuration. Each `backend.hcl.example` enables encryption and native S3 lockfiles with `use_lockfile = true`; deprecated DynamoDB-based locking is not copied forward. Backend buckets are intentionally not created or named by this repository.
 
+The AWS Cloud Control index resource cannot complete its lifecycle against this collection while every matching AOSS network policy is private. Authorized index apply/update operations must therefore use `scripts/aoss-index-lifecycle.sh apply --root infra/live/<environment> -- <terraform-options>`: it first applies an exact-collection, collection-only public network exception, then removes it in a second successful apply. Authorized destroy operations must use the helper's `destroy` mode, which enables the same exception before destroy and keeps it enabled until the index and policy are deleted. The helper requires an explicit live root, preserves the root's existing backend initialization, accepts options such as `-var-file=terraform.tfvars`, and never chooses production by default. See [operations.md](docs/operations.md) before any separately authorized AWS operation.
+
 ## Security
 
 - S3 blocks public access, enforces bucket-owner object ownership, enables versioning and default encryption, and denies insecure transport.
 - SQS and its source DLQ use SQS-managed encryption and exact queue/bucket conditions for S3 event delivery.
 - AOSS uses mandatory encryption, a private AOSS-managed VPC endpoint, an explicit network policy, and separate writer and reader data rules.
+- Private-only is the required steady state. The default-off provisioning exception temporarily makes only the exact collection network-reachable for AWSCC index lifecycle operations; it never exposes Dashboards or changes data authorization.
 - The ingestion role can read only the configured archive prefix and consume only the configured queue. Sink-DLQ writes must be limited to the designated S3 bucket and prefix.
 - `reader_principals` accepts collection-account IAM role/user ARNs and AOSS SAML user/group identity strings. Cross-account users must assume a role in the collection account. The SAML provider remains owned by the external identity platform.
-- The ingestion data policy grants collection-level create, update, and describe permissions needed for templates, but no collection-item delete permission. Index and document delete permissions are also excluded.
+- Terraform owns the exact `logs` index lifecycle. The ingestion data policy grants OSIS the documented create, update, describe, and document-write actions only on that index, but `management_disabled` prevents the pipeline configuration from managing its schema. OSIS receives no template, read, or delete permissions.
 - No credentials or secrets appear in Terraform. Account IDs, principal identifiers, VPC IDs, and subnet IDs are deployment inputs, not secrets.
 
 See [security.md](docs/security.md) for IAM and data-access details.

@@ -70,6 +70,22 @@ variable "reader_principals" {
   }
 }
 
+variable "index_manager_principal_arn" {
+  description = "IAM role or user ARN used by Terraform to manage the dev logs index."
+  type        = string
+
+  validation {
+    condition     = can(regex("^arn:[^:]+:iam::${var.aws_account_id}:(role|user)/.+$", var.index_manager_principal_arn))
+    error_message = "index_manager_principal_arn must be an IAM role or user ARN in aws_account_id."
+  }
+}
+
+variable "provisioning_public_access_enabled" {
+  description = "Temporary AWSCC index lifecycle network exception. Keep false except during the documented two-phase procedure."
+  type        = bool
+  default     = false
+}
+
 variable "raw_log_prefix" {
   description = "S3 prefix that accepts canonical NDJSON or gzip NDJSON objects."
   type        = string

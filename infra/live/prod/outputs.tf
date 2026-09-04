@@ -28,6 +28,16 @@ output "opensearch_dashboard_endpoint" {
   value       = module.opensearch_serverless.dashboard_endpoint
 }
 
+output "aoss_provisioning_public_access_enabled" {
+  description = "Whether the temporary exact-collection AOSS public network policy is enabled. False is the required steady state."
+  value       = module.opensearch_serverless.provisioning_public_access_enabled
+}
+
+output "aoss_provisioning_public_policy_name" {
+  description = "Reserved name of the temporary AOSS public network policy."
+  value       = module.opensearch_serverless.provisioning_public_policy_name
+}
+
 output "ingestion_pipeline_arn" {
   description = "OpenSearch Ingestion pipeline ARN."
   value       = module.opensearch_ingestion.pipeline_arn
