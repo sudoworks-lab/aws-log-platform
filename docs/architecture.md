@@ -134,3 +134,13 @@ Modules represent a lifecycle, owner, security boundary, or reuse point:
 The separate identity module avoids a dependency cycle between the collection data policy and the pipeline while keeping IAM consistent across environment roots.
 
 The live roots pass the AOSS index resource's name into the ingestion module. That resource reference guarantees the order collection, then `logs` index with strict mapping, then OSIS pipeline, so the first document cannot create a dynamically mapped index ahead of Terraform.
+
+## Authoritative references
+
+- [AWS: S3 as an OpenSearch Ingestion source](https://docs.aws.amazon.com/opensearch-service/latest/developerguide/configure-client-s3.html)
+- [AWS: OpenSearch Ingestion pipeline features and S3 sink DLQs](https://docs.aws.amazon.com/opensearch-service/latest/developerguide/osis-features-overview.html)
+- [AWS: scaling OpenSearch Ingestion pipelines](https://docs.aws.amazon.com/opensearch-service/latest/developerguide/ingestion-scaling.html)
+- [AWS: OpenSearch Serverless data access](https://docs.aws.amazon.com/opensearch-service/latest/developerguide/serverless-data-access.html)
+- [AWS: SAML authentication for OpenSearch Serverless](https://docs.aws.amazon.com/opensearch-service/latest/developerguide/serverless-saml.html)
+- [AWS: OpenSearch Ingestion metrics](https://docs.aws.amazon.com/opensearch-service/latest/developerguide/monitoring-pipeline-metrics.html)
+- [HashiCorp: S3 backend and native lockfiles](https://developer.hashicorp.com/terraform/language/backend/s3)

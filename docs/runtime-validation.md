@@ -30,10 +30,15 @@ The final runtime sequence also confirmed that one rejected document did not for
 1. `management_disabled` in the OSIS sink did not make `template_content` the owner of the AOSS mapping. The deployed index did not reflect the intended strict numeric mapping when the schema was expressed as an OSIS template.
 2. Schema ownership was moved to the Terraform-managed AOSS `logs` index. The OSIS sink now writes to that pre-created index with index management disabled.
 3. The private-only collection exposed an AWS Cloud Control index lifecycle constraint: the AWSCC index handler could not complete the index lifecycle while the collection was reachable only through private network policies.
-4. The repository therefore contains a default-off, exact-collection lifecycle exception. `scripts/aoss-index-lifecycle.sh` scopes the temporary collection-only network access to the index lifecycle phase and restores the private-only configuration after a successful operation. The helper's guardrails and two-phase behavior are validated locally with Terraform mock coverage and shell validation.
+4. The repository therefore contains a default-off, exact-collection lifecycle exception. `scripts/aoss-index-lifecycle.sh` scopes the temporary collection-only network access to the index lifecycle phase, removes it after a successful create/update, and keeps it until index deletion during destroy. The final helper's input guards and phase orchestration were checked locally with a mock Terraform runner and shell validation. The final helper itself was not rerun through a full AWS end-to-end lifecycle; the runtime results above do not certify that final automation.
 5. Private-only remains the steady state. The temporary network exception does not add Dashboards access, change AOSS data authorization, or grant a broader reader/writer capability.
 
-The initial runtime attempts were useful evidence rather than hidden failures: they exposed an unsupported processor-field placement, an ineffective identity-policy condition, and the template-versus-index ownership mismatch. Those issues were corrected before the final data-path and failure-path checks recorded above.
+The initial runtime attempts also exposed two integration failures:
+
+- OSIS rejected `add_when` at the wrong processor level during `CreatePipeline`. Moving the condition into the affected `entries` element corrected the placement; a regression assertion covers it.
+- The AOSS control-plane collection condition did not provide an effective identity allow for OSIS calls. The unusable condition was removed while retaining the exact required action list and the separate exact-index data access scope. See the [IAM wildcard rationale](security.md#iam-wildcard-exceptions).
+
+These issues and the template-versus-index ownership mismatch were corrected before the final data-path and failure-path checks recorded above.
 
 ## Fact boundary
 
@@ -55,6 +60,8 @@ The initial runtime attempts were useful evidence rather than hidden failures: t
 
 ### Not validated
 
+- A full AWS end-to-end rerun using the final lifecycle helper itself.
+- Production deployment.
 - Production load, throughput, indexing or search latency, and service quota behavior.
 - Long-duration operation, multi-AZ failure behavior, and disaster recovery.
 - A production alerting, paging, ownership, or replay process.

@@ -9,7 +9,9 @@ Lambda functions and repeated Firehose streams can accumulate parsing, buffering
 
 ## Decision
 
-Use Amazon OpenSearch Ingestion with an S3/SQS source, newline codec, automatic compression detection, failure-aware JSON parsing, explicit event and ingestion timestamps, small schema enrichment, a core `dynamic: false` index template, end-to-end acknowledgement, an OpenSearch Serverless sink, and a separate S3 DLQ for documents rejected by that sink.
+Use Amazon OpenSearch Ingestion with an S3/SQS source, newline codec, automatic compression detection, failure-aware JSON parsing, explicit event and ingestion timestamps, small schema enrichment, end-to-end acknowledgement, an OpenSearch Serverless sink, and a separate S3 DLQ for documents rejected by that sink. Terraform owns the exact pre-created `logs` index with `dynamic: false` and strict numeric mappings (`coerce: false`); OSIS writes to it with `management_disabled` and no index template configuration.
+
+The [2026-09-04 runtime findings](../runtime-validation.md#runtime-findings-and-design-evolution) refined this schema boundary: an OSIS template alongside `management_disabled` did not establish the intended index mapping. The managed ingestion decision remains; index/schema lifecycle belongs to Terraform.
 
 ## Consequences
 

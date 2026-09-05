@@ -1,159 +1,172 @@
-# AWS Log Platform (2026)
+# AWS Log Platform
 
-[![Terraform CI](https://github.com/sudoworks-lab/aws-log-platform/actions/workflows/terraform-ci.yml/badge.svg?branch=main)](https://github.com/sudoworks-lab/aws-log-platform/actions/workflows/terraform-ci.yml)
+[![Terraform CI](https://github.com/sudoworks-lab/aws-log-platform/actions/workflows/terraform-ci.yml/badge.svg?branch=main)](https://github.com/sudoworks-lab/aws-log-platform/actions/workflows/terraform-ci.yml) · [MIT License](LICENSE)
 
-AWS Log Platform is a Terraform-based reference implementation for durable log evidence and rebuildable search. Producers write NDJSON to Amazon S3 first; S3 notifications travel through Amazon SQS; Amazon OpenSearch Ingestion (OSIS) parses and enriches records; and Amazon OpenSearch Serverless (AOSS) serves a private, time-bounded search projection. Terraform owns the environment boundaries, strict `logs` index mapping, IAM rules, lifecycle settings, and operational signals. The core data path and failure path were validated in a temporary development deployment in `ap-northeast-1`; the deployment and its test resources were destroyed afterward. This repository does not provide a continuously running environment or automatic deployment, and any deployment requires explicit account, security, quota, cost, and runtime review.
+**raw logの保全と検索の可用性を分ける、Terraform製のAWSログ基盤リファレンス実装。**
+S3へ先に原本を保存し、SQS → OpenSearch Ingestion（OSIS）→ OpenSearch Serverless（AOSS）で検索可能にする。検索が止まった場合の復旧元を、検索系の外に残す。
 
-## Problem
+- **正本と再構築**: S3がcanonical raw archive、AOSSが保持期間を持つ再構築可能なsearch projection
+- **責務と失敗単位**: SQSがobject/eventのretry境界、OSISがingestion runtime、Terraformがexact `logs` indexとschemaを所有
+- **分離とアクセス**: dev/prodは別root・別state。AOSSの定常状態はprivate-only
+- **現在地**: temporary dev環境で実AWSのdata pathとsink rejection / DLQを確認済み。検証環境は撤去済み。**production-readyは主張しない**
 
-Durable evidence and search availability are different operational concerns. If a canonical S3 object is lost, the platform has a raw-data incident. If an index is unavailable, ingestion is delayed, or a search projection is deleted, the platform has a search incident that can be recovered by rebuilding from retained S3 objects. The design makes that distinction visible in storage, permissions, failure handling, and recovery procedures.
+[実AWSの検証記録](docs/runtime-validation.md) · [ローカル検証](#クイックスタート--ローカル検証) · [詳細docs](#ドキュメント)
 
-## Key decisions
-
-- S3 is the canonical raw archive. OpenSearch is a rebuildable projection and never the only copy of a log.
-- SQS is the durable object/event retry boundary. Its source DLQ contains failed object/event messages, not individual sink documents.
-- OSIS owns managed ingestion runtime behavior: polling, visibility extension, decompression, parsing, retries, and sink-DLQ delivery.
-- Terraform owns the exact `logs` index and its strict mapping. OSIS uses `management_disabled`; unknown fields remain in `_source` but do not become searchable without schema review.
-- AOSS is private-only in steady state. A default-off, exact-collection network exception exists only for the measured AWS Cloud Control index lifecycle constraint and is removed by the lifecycle helper after the operation.
-
-## Validated on AWS
-
-The runtime evidence covers a dev-only temporary deployment. No production environment was deployed, and all test resources and test data were removed after validation.
-
-- OSIS reached `ACTIVE` and processed the S3 → SQS → OSIS → private AOSS path.
-- A private SigV4 query returned indexed documents with the occurrence timestamp, `ingested_at`, and expected parsed fields.
-- Malformed JSON was preserved as the raw `message` with an explicit parse-status marker.
-- Terraform-managed strict mapping was observed at runtime: `http.status_code` was `integer` with `coerce=false`, and `http.duration_ms` was `long` with `coerce=false`.
-- A numeric-looking string was rejected by the strict mapping and preserved in the S3 sink DLQ; the source queue and source DLQ remained empty.
-- Terraform destroy completed, including index and network-policy cleanup, and direct residual inventory was zero.
-
-The exact evidence boundary and unverified production concerns are documented in [runtime validation](docs/runtime-validation.md).
-
-## What I learned and evolved from the 2022 implementation
-
-The earlier design used Fluentd, multiple Firehose delivery streams, Lambda for transport or notification gaps, OpenSearch, selected S3 output, and CloudWatch-to-Slack alerting. It was useful for learning batching, retries, formats, permissions, and operational failure modes. This version turns those lessons into explicit ownership boundaries: S3 before search, separate source and sink failure units, event time distinct from ingestion time, Terraform-owned schema, separate dev/prod state roots, and least-privilege policies that can be reviewed independently.
-
-See the detailed comparison in [migration from 2022](docs/migration-from-2022.md).
-
-## Architecture
+## Architecture — データ・所有権・失敗単位
 
 ```mermaid
 flowchart LR
-    P[Log producers and adapters] -->|NDJSON or gzip NDJSON| S3[(S3 raw archive)]
-    S3 -->|ObjectCreated| Q[SQS ingestion queue]
-    Q -. repeated object or event failure .-> SDLQ[SQS source DLQ]
-    Q --> OSIS[OpenSearch Ingestion]
-    OSIS -->|parsed and marked documents| AOSS[(OpenSearch Serverless)]
-    OSIS -. individual sink failure .-> ODLQ[(S3 sink DLQ)]
-    AOSS --> U[Search and investigation]
-    CW[CloudWatch alarms and pipeline logs] -. observes .-> Q
-    CW -. observes .-> OSIS
+    P["Producer adapters<br/>core scope外"] -->|NDJSON / gzip| S3[("S3 raw archive<br/>canonical")]
+    S3 -->|ObjectCreated| Q["SQS<br/>object/event retry"]
+    S3 -->|object read| O["OSIS<br/>managed ingestion"]
+    Q -->|S3 event| O
+    O -->|document write| A[("AOSS logs index<br/>rebuildable / private")]
+    Q -.->|object/event failure| SD["SQS source DLQ"]
+    O -.->|document failure| DD[("S3 sink DLQ")]
+    T["Terraform<br/>schema owner"] ==>|create / map| A
 ```
 
-The implemented boundary starts when an object exists under the configured S3 raw prefix. Fluent Bit, OpenTelemetry Collector, CloudWatch Logs, and Amazon Data Firehose are representative producer adapters, but none is provisioned here. Producers must preserve the S3 object and event schema contracts.
+実線はdata path、破線はfailure path、太線はschemaの管理経路。図はprivate-onlyの定常状態を示す。検索・DashboardsはAOSS-managed VPC endpoint経由、OSISはservice-managed PrivateLink経由でcollectionへ接続する。
 
-The two DLQs have different scopes:
+coreの入力境界は、producerがS3 raw prefixへ完全なobjectを書き終えた時点。Fluent Bit、OpenTelemetry Collector、CloudWatch Logs、Firehoseなどのadapterは外部integrationとして扱う。
 
-- The SQS source DLQ contains S3 object-event messages that repeatedly failed source processing. One message can represent an entire object that is not yet searchable.
-- The S3 sink DLQ contains individual documents that OSIS could not write to AOSS after sink handling. Failure to write those records to the S3 sink DLQ is a high-severity ingestion incident, although the original raw object remains canonical in S3.
+## 主な機能と設計判断
 
-The source does not rely only on a fixed SQS visibility timeout. While long-running object processing remains in flight, visibility duplication protection extends visibility up to the configured limit to reduce duplicate consumers; the standard queue remains at-least-once.
+| 機能・境界 | なぜこの設計か |
+| --- | --- |
+| **S3へ先に保存** | ingestionは原本を削除しない。検索indexを失っても、保持済みobjectを復旧元にできる |
+| **SQSでobject/eventを再試行** | source処理の失敗を可視化し、backlog・visibility・redriveを一つの境界で扱う |
+| **OSISにruntimeを委ねる** | polling、visibility延長、展開、parse、sink retryをmanaged serviceへ集約する |
+| **Terraformがschemaを所有** | exact `logs` indexをOSISより先に作る。`management_disabled`でruntimeとschema lifecycleを分離する |
+| **rawとsearchの保持期間を分離** | S3のexpirationはdefault off。AOSSの`search_retention_days`は検索用の保持期間だけを制御する |
+| **CloudWatchで失敗を観測** | queue age、source failure、sink rejection、sink DLQ write failureを区別する。通知先のintegrationは外部所有 |
 
-## Event contract
+OSIS persistent bufferは採用していない。S3とSQSをdurability境界とし、追加bufferのOCU・KMS・cost設計は別の判断として残す。AOSSのretention設定はhot/warm配置を制御しない。
 
-Each NDJSON line must be a JSON object with `timestamp` in ISO-8601 form with milliseconds and a timezone, for example `2026-09-03T10:15:30.123Z`. `timestamp` and the derived `@timestamp` both mean event occurrence time. `ingested_at` means the time the source received the event for processing; it must not replace occurrence time.
+## ログとschemaの契約
 
-On a successful JSON parse, the indexed `message` is the application's message from the JSON object. On malformed JSON, processing continues, `message` retains the raw line, and `log_platform.parse_status` marks the document as `malformed_json`. Successfully parsed events do not receive that failure marker. A malformed event does not receive a fabricated occurrence timestamp.
+入力は1行1 JSON objectのNDJSON、またはgzip NDJSON。正常なeventには`message`と、millisecond精度・timezone付きISO-8601の`timestamp`が必要になる。
 
-The Terraform-managed `logs` index uses `dynamic: false` and explicitly maps the supported root fields and the `http`, `error`, and `log_platform` objects. Unknown fields remain available in `_source`, but are not searchable until schema review adds an explicit mapping. Numeric fields must be encoded as JSON numbers; numeric-looking strings violate the schema and rejected documents are isolated in the S3 sink DLQ. See [architecture.md](docs/architecture.md) for the field list.
+| 入力・処理 | 契約 |
+| --- | --- |
+| 発生時刻と受信時刻 | `timestamp` / `@timestamp`は発生時刻、`ingested_at`はsource受信時刻。欠落した発生時刻を処理時刻で埋めない |
+| Malformed JSON | raw lineを`message`へ保持し、`log_platform.parse_status = malformed_json`を付けて処理を継続する |
+| 未知のfield | `dynamic=false`。`_source`へ残すがindexしない。検索対象への追加には明示的なschema変更が必要 |
+| Numeric field | `http.status_code`は`integer`、`http.duration_ms`は`long`。ともに`coerce=false`で、数値に見える文字列も拒否する |
 
-## Data lifecycle and capacity
+field一覧と入力条件は[Architecture](docs/architecture.md#event-and-timestamp-contract)を参照する。
 
-S3 objects remain canonical and are never deleted by the ingestion pipeline. Configurable lifecycle settings move current and noncurrent objects from S3 Standard to Standard-IA and then Deep Archive. Expiration is disabled by default and can only be enabled deliberately.
+## 障害時に何が残るか
 
-`search_retention_days` controls the AOSS time-series data lifecycle period for the rebuildable search projection. It does not select or control hot/warm placement.
+**SQS source DLQはobject/event、S3 sink DLQは個別document。** 同じ「DLQ」でも、影響範囲と再投入単位が異なる。
 
-The OSIS persistent buffer is not adopted in this design because S3 plus SQS form the explicit durability boundary. This does not reject persistent buffering as a capability: enabling it later requires an explicit OCU allocation, KMS ownership and permissions, and cost design, and it would not replace the canonical archive or replay queue.
+| 障害 | 残るもの・失敗単位 | 復旧の起点 |
+| --- | --- | --- |
+| S3通知・source処理の失敗、OSIS停止 | rawはS3。繰り返すobject/event処理の失敗はSQS source DLQ | 通知・権限・形式を修正し、対象objectを限定してreplay / redrive |
+| AOSS sinkがdocumentを拒否 | rawはS3。個別の拒否documentと失敗情報はS3 sink DLQ | schema・権限を修正し、対象documentまたはobjectを再投入 |
+| **sink DLQへの保存も失敗** | rawはS3に残るが、検索結果と直近の個別failure recordを失う | 高severityで扱い、原本とpipeline evidenceから対象を特定 |
+| AOSS停止・index削除 | rawはS3。検索が停止・欠落 | index/schemaを復元し、S3 key・期間を限定して再構築 |
+| Deep Archiveからのreplay | 保持済み原本はあるが、すぐには読めない | S3 restore後に再投入。restore時間とcostを考慮 |
+| **canonical objectと全保持versionの喪失** | raw evidenceの損失 | producer側の回復可能性を調査。AOSSやsink DLQを原本の代わりにしない |
 
-Production uses a minimum of 2 ingestion OCUs, which distributes active ingestion OCUs across 2 Availability Zones. Development uses a minimum of 1 OCU to reduce cost and accepts the corresponding availability tradeoff. Minimum and maximum OCU settings must be tuned against measured throughput, cost, and the search-freshness SLO.
+sink拒否documentはS3 sink DLQへの保存後にacknowledgeできるため、1件の不正documentだけを理由にobject全体を永久再処理しない。実AWSでもsink rejection時にsource queue / source DLQが空のままであることを観測した。source DLQのredrive成功を示す結果ではない。
 
-## Failure model
+S3通知とSQS standard queueはat-least-once。OSISのvisibility延長は重複consumerを抑えるが、exactly-onceを保証しない。通知欠落やqueue retention超過時には、S3 inventoryから再投入対象を特定する。詳細は[障害モデルA–Hと復旧手順](docs/operations.md#failure-model-ah)を参照する。
 
-The A–H failure model separates canonical raw loss from search unavailability and distinguishes source-message failures from individual sink-document failures. See [operations.md](docs/operations.md) for the complete runbooks.
+## 2022 → 2026: 設計責任を整理する
 
-## Terraform structure
+2022年はFluentd、複数のFirehose、補助Lambda、OpenSearch、選択的なS3出力、CloudWatch → Slackを接続し、batching・retry・形式・権限の難しさを学んだ。2026年版では、その経験を独立してレビューできる責務へ整理した。
 
-`infra/modules` contains modules aligned to lifecycle, ownership, reuse, and security boundaries. `infra/live/dev` and `infra/live/prod` are independent root configurations with independent S3 backend keys. The small amount of root wiring is intentionally repeated so production state does not share a root or workspace blast radius with development.
+| 論点 | 2026年版で明示した責任 |
+| --- | --- |
+| Durability / rebuildability | S3を先に確定し、AOSSの再構築元と保持責任を検索系から分離 |
+| Failure unit | object/event retryと個別document rejectionを別DLQで管理 |
+| Schema ownership | OSISがruntime、Terraformがexact indexとstrict mappingを所有 |
+| Environment isolation | dev/prodのroot・state・account入力・権限を分離 |
+| Least privilege | source prefix、queue、sink DLQ prefix、index、readerを個別にscope化 |
+| Evidence-driven validation | mockの成功に加え、実機の拒否・mapping・DLQ・撤去結果で設計を修正 |
 
-Terraform workspaces remain useful for light variations of the same environment. They are not the primary isolation boundary here: environments with materially different accounts, permissions, lifecycle, or blast radius get separate root configurations and state objects.
+背景は[日本語ケーススタディ](docs/portfolio-ja.md)、詳細比較は[2022年からの移行記録](docs/migration-from-2022.md)にまとめた。
 
-Remote state uses a partial `backend "s3" {}` configuration. Each `backend.hcl.example` enables encryption and native S3 lockfiles with `use_lockfile = true`; deprecated DynamoDB-based locking is not copied forward. Backend buckets are intentionally not created or named by this repository.
+## 実AWSで判明した問題と設計変更
 
-The AWS Cloud Control index resource cannot complete its lifecycle against this collection while every matching AOSS network policy is private. Index apply/update operations must therefore use `scripts/aoss-index-lifecycle.sh apply --root infra/live/<environment> -- <terraform-options>`: it first applies an exact-collection, collection-only network exception, then removes it in a second successful apply. The helper's `destroy` mode enables the same exception before destroy and keeps it enabled until the index and policy are deleted. The helper requires an explicit live root, preserves the root's existing backend initialization, accepts options such as `-var-file=terraform.tfvars`, and never chooses production by default. See [operations.md](docs/operations.md) before a deployment review.
+| 実機で観測した問題 | 反映した設計変更 |
+| --- | --- |
+| **OSIS `add_when` placement**: processor設定を`CreatePipeline`が拒否 | 条件を対象の`entries`要素へ移動し、regression assertionを追加 |
+| **AOSS IAM conditionが機能しない**: OSISのcontrol-plane呼び出しで意図したidentity allowにならない | 適用できないcollection conditionを除去し、必要actionを列挙。data access policyのexact index scopeは維持 |
+| **`management_disabled` / template ownershipの不一致**: 意図したstrict mappingが実indexに反映されない | schemaをTerraformの`awscc_opensearchserverless_collection_index`へ移し、OSIS template設定を除去 |
+| **private AOSS + AWSCC CollectionIndex lifecycle制約**: private-onlyではindex handlerがlifecycleを完了できない | exact collectionだけのtemporary public network exceptionと二段階lifecycle helperを用意 |
 
-## Security
+これらの拒否とmapping不一致を修正した後、data pathとsink failure pathを実機で確認した。**最終版lifecycle helper自体のfull E2Eは再実行していない。** helperの入力制限とphase orchestrationの確認はlocal/mockの範囲に留まる。[検証記録](docs/runtime-validation.md#runtime-findings-and-design-evolution)に事実の境界を残している。
 
-- S3 blocks public access, enforces bucket-owner object ownership, enables versioning and default encryption, and denies insecure transport.
-- SQS and its source DLQ use SQS-managed encryption and exact queue/bucket conditions for S3 event delivery.
-- AOSS uses mandatory encryption, a private AOSS-managed VPC endpoint, an explicit network policy, and separate writer and reader data rules.
-- Private-only is the required steady state. The default-off provisioning exception temporarily makes only the exact collection network-reachable for AWSCC index lifecycle operations; it never exposes Dashboards or changes data authorization.
-- The ingestion role can read only the configured archive prefix and consume only the configured queue. Sink-DLQ writes must be limited to the designated S3 bucket and prefix.
-- `reader_principals` accepts collection-account IAM role/user ARNs and AOSS SAML user/group identity strings. Cross-account users must assume a role in the collection account. The SAML provider remains owned by the external identity platform.
-- Terraform owns the exact `logs` index lifecycle. The ingestion data policy grants OSIS the documented create, update, describe, and document-write actions only on that index, but `management_disabled` prevents the pipeline configuration from managing its schema. OSIS receives no template, read, or delete permissions.
-- No credentials or secrets appear in Terraform or the example configuration. Deployment-specific identifiers are supplied outside the repository.
+## Security boundaryと環境分離
 
-See [security.md](docs/security.md) for IAM and data-access details.
+- **Storage**: S3はpublic access block、versioning、暗号化、bucket-owner-enforced ownership、TLS強制。SQS / source DLQも暗号化する
+- **Networkと認可**: AOSSはprivate-onlyが定常状態。IAM identity policyとAOSS data access policyを別の認可層として維持する
+- **Least privilege**: OSISのreadはarchive prefix、queue操作は対象queue、sink DLQ writeは指定bucket/prefixへ限定する
+- **Schema操作**: Terraform index managerはexact `logs` indexのCreate / Update / Describe / Delete、OSISは同indexのCreate / Update / Describe / WriteDocument。OSISにtemplate・read・delete権限を与えず、schema管理を無効化する
+- **Identity**: readerはread-only。IAM/SAMLのidentity基盤は外部所有。cross-account利用者はcollection account内のroleをassumeする
+- **State**: [dev](infra/live/dev) / [prod](infra/live/prod)は独立root・別backend key。共有moduleは[infra/modules](infra/modules)へ置き、Terraform Workspaceを主要な環境分離境界にしない
 
-## Five-minute review path
+AWS API上必要なIAM wildcardと、適用できるconditionの理由は[Security model](docs/security.md#iam-wildcard-exceptions)に記録した。backendはpartial S3設定とnative S3 lockfileを使い、backend bucketとdeployment固有の識別子は外部から渡す。
 
-1. Read this summary and the [architecture diagram and contracts](docs/architecture.md).
-2. Read [runtime validation](docs/runtime-validation.md) to see what was proven on AWS and what remains unverified.
-3. Inspect the module boundaries under `infra/modules`, the independent roots under `infra/live`, and the mock tests under each module's `tests/` directory.
-4. Review [security](docs/security.md) and [operations](docs/operations.md) for IAM, private networking, lifecycle handling, and failure recovery.
-5. Compare the design with the [2022 migration](docs/migration-from-2022.md), or read the [Japanese case study](docs/portfolio-ja.md) for the portfolio narrative.
+### AWSCC index lifecycleの限定例外
 
-## How to verify
+実機で確認したAWSCC制約に対し、`provisioning_public_access_enabled`はdefault off。lifecycle操作時だけ**exact collectionのnetwork到達性をpublicにする**。Dashboards、IAM、data access権限は広げない。
 
-Prerequisite: Terraform 1.10 or later. Run:
+[Lifecycle helper](scripts/aoss-index-lifecycle.sh)は明示したlive rootで例外を有効化し、create/update成功後の2回目のapplyでprivate-onlyへ戻す。destroyではindex削除まで例外を維持し、その後policyも削除する。途中失敗では例外が残り得るため、定常状態への復帰を確認する必要がある。実行条件と回復手順は[Operations](docs/operations.md#aoss-index-lifecycle-procedure)を参照する。
+
+## 検証済み範囲とcurrent readiness
+
+実AWSの記録は**2026-09-04、`ap-northeast-1`のtemporary dev validation**。常時稼働環境は提供していない。
+
+| 区分 | 確認したこと / 未確認のこと |
+| --- | --- |
+| **実AWS: data path** | OSIS `ACTIVE`、S3 → SQS → OSIS → private AOSS、private SigV4 query、発生時刻と受信時刻の分離、malformed JSON保存 |
+| **実AWS: failure path** | 実mappingのstrict numeric型・`coerce=false`、数値に見える文字列の拒否、S3 sink DLQへの保存、source queue / source DLQが空であること |
+| **実AWS: 撤去** | Terraform destroy完了。検証用resource・dataの削除後、対象resourceのdirect residual inventoryはzero |
+| **Local / mock** | Terraform fmt、backendなしのinit / validate、module mock tests。別途、shell syntaxとhelperの入力制限・二段階制御を確認 |
+| **最終helper: 未検証** | 最終版helperそのものを通したfull AWS E2E再実行 |
+| **Production: 未検証** | deployment、load / throughput / latency / quota、長時間稼働、AZ障害、DR、paging / replay運用、実cost |
+
+公開情報は[Runtime Validation Report](docs/runtime-validation.md)へ集約した。raw receipt、account ID、ARN、resource ID、endpointは公開summaryへ含めない。上の実AWS結果は過去の限定検証であり、現在の稼働・残存状況を監視するものではない。
+
+### 保証すること / 保証しないこと
+
+**実装契約として保証する境界**は、原本を削除しないingestion、source/sinkの失敗単位、Terraform-owned schema、dev/prodのroot・state分離。原本が保持されていることを再構築の前提に置く。
+
+**保証しないこと**は、raw dataの絶対的な無損失、exactly-once、即時検索、rebuildの所要時間、production availability / capacity / cost。prodの最小2 OCU・2-AZ構成、devの最小1 OCUは設定上の開始値であり、負荷・可用性の実証ではない。
+
+producer adapter、dashboard frontend、認証UI、SAML provider、multi-Region、cross-account集約、SIEM / Security Lake、traces / metrics基盤、incident自動化、Kubernetes、Slack integrationは提供範囲外。
+
+## クイックスタート / ローカル検証
+
+前提はBash、Make、Terraform **1.10以上・2.0未満**とprovider取得用network。checkoutのrootで実行する。AWS credentialやbackend設定は不要。
 
 ```bash
 make verify
 ```
 
-The script runs `terraform fmt -recursive -check`, then copies Terraform sources to a temporary directory and runs `terraform init -backend=false` and `terraform validate` for every module and live root. It also runs every module's `tests/*.tftest.hcl` with mocked providers and creates no AWS resources. It does not run a standalone `plan`, `apply`, or AWS API operation. If `tflint` is available, the script reports it but does not run it because no repository-specific plugin policy is defined.
+実行内容:
 
-Local validation proves syntax, provider schema compatibility, and module wiring only. It does not prove regional service availability, IAM effectiveness, service quotas, OSIS pipeline acceptance, data throughput, availability behavior, or runtime recovery.
+1. `terraform fmt -recursive -check`
+2. Terraform sourceを一時directoryへコピーし、全module・live rootで`init -backend=false`と`validate`
+3. `tests/*.tftest.hcl`があるmoduleでmock providerによる`terraform test`
 
-## Scope and operational boundary
+確認範囲は構文・provider schema互換性・module wiringとmock assertion。standalone `plan` / `apply`やAWS runtime検証は行わない。CIもこの検証経路を使う。`tflint`はrepo固有plugin policyが未定義のため実行しない。
 
-This repository provides Terraform configuration, tests, lifecycle procedures, and evidence documentation. It does not provide a continuously running AWS environment, automatic deployment, producer adapters, a dashboard frontend, an authentication UI, a SAML provider, multi-Region operation, cross-account central logging, a SIEM, Amazon Security Lake, a full OpenTelemetry traces/metrics platform, incident automation, Kubernetes, or Slack integration.
+deploymentは別途account・security・quota・cost・runtime testのレビューを要する作業。最初の確認はこのlocal verifyだけで完結する。
 
-## Start here
+## ドキュメント
 
-1. Read [architecture.md](docs/architecture.md) and [security.md](docs/security.md).
-2. Copy the examples in one `infra/live/<environment>` directory without putting credentials in them.
-3. Run `make verify`.
-4. Treat any plan or deployment as a separate change requiring an AWS account review, quota check, cost review, and runtime test plan.
+| レビューしたいこと | 入口 |
+| --- | --- |
+| 入力・時刻・mapping・ownership・capacity | [Architecture](docs/architecture.md) |
+| 実AWSで確認できたことと未検証事項 | [Runtime validation](docs/runtime-validation.md) |
+| IAM・private network・wildcardの理由 | [Security](docs/security.md) |
+| 障害A–H・観測signal・replay・lifecycle操作 | [Operations](docs/operations.md) |
+| 2022年の経験と2026年の判断 | [日本語ケーススタディ](docs/portfolio-ja.md) / [設計比較](docs/migration-from-2022.md) |
+| 決定の根拠とtrade-off | ADR: [S3正本](docs/adr/0001-s3-as-source-of-truth.md) / [managed ingestion](docs/adr/0002-managed-opensearch-ingestion.md) / [環境・state分離](docs/adr/0003-environment-state-boundaries.md) |
+| 構成と検証コード | [Modules](infra/modules) / [Dev root](infra/live/dev) / [Prod root](infra/live/prod) / [Verify script](scripts/verify.sh) |
 
-## Documentation
-
-- [Japanese portfolio case study](docs/portfolio-ja.md)
-- [Runtime validation report](docs/runtime-validation.md)
-- [Architecture](docs/architecture.md)
-- [Security](docs/security.md)
-- [Operations and failure handling](docs/operations.md)
-- [Migration from 2022](docs/migration-from-2022.md)
-
-## Authoritative references
-
-- [AWS: S3 as an OpenSearch Ingestion source](https://docs.aws.amazon.com/opensearch-service/latest/developerguide/configure-client-s3.html)
-- [AWS: OpenSearch Ingestion pipeline features and S3 sink DLQs](https://docs.aws.amazon.com/opensearch-service/latest/developerguide/osis-features-overview.html)
-- [AWS: scaling OpenSearch Ingestion pipelines](https://docs.aws.amazon.com/opensearch-service/latest/developerguide/ingestion-scaling.html)
-- [AWS: OpenSearch Serverless data access](https://docs.aws.amazon.com/opensearch-service/latest/developerguide/serverless-data-access.html)
-- [AWS: SAML authentication for OpenSearch Serverless](https://docs.aws.amazon.com/opensearch-service/latest/developerguide/serverless-saml.html)
-- [AWS: OpenSearch Ingestion metrics](https://docs.aws.amazon.com/opensearch-service/latest/developerguide/monitoring-pipeline-metrics.html)
-- [HashiCorp: S3 backend and native lockfiles](https://developer.hashicorp.com/terraform/language/backend/s3)
-
-## License
-
-This project is licensed under the [MIT License](LICENSE).
+利用許諾は[MIT License](LICENSE)。
