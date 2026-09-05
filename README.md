@@ -1,12 +1,39 @@
 # AWS Log Platform (2026)
 
-AWS Log Platform keeps raw logs in Amazon S3, sends S3 object notifications through Amazon SQS and its source dead-letter queue (DLQ), processes records with Amazon OpenSearch Ingestion (OSIS), and writes a bounded search projection to Amazon OpenSearch Serverless (AOSS). S3 is the canonical archive; OpenSearch is rebuildable. This repository describes and configures that architecture, but does not deploy it by itself, and `terraform apply` remains forbidden unless a later request explicitly authorizes deployment.
+[![Terraform CI](https://github.com/sudoworks-lab/aws-log-platform/actions/workflows/terraform-ci.yml/badge.svg?branch=main)](https://github.com/sudoworks-lab/aws-log-platform/actions/workflows/terraform-ci.yml)
 
-## Why
+AWS Log Platform is a Terraform-based reference implementation for durable log evidence and rebuildable search. Producers write NDJSON to Amazon S3 first; S3 notifications travel through Amazon SQS; Amazon OpenSearch Ingestion (OSIS) parses and enriches records; and Amazon OpenSearch Serverless (AOSS) serves a private, time-bounded search projection. Terraform owns the environment boundaries, strict `logs` index mapping, IAM rules, lifecycle settings, and operational signals. The core data path and failure path were validated in a temporary development deployment in `ap-northeast-1`; the deployment and its test resources were destroyed afterward. This repository does not provide a continuously running environment or automatic deployment, and any deployment requires explicit account, security, quota, cost, and runtime review.
 
-Durable evidence and search availability are separate concerns. Losing or being unable to recover a canonical S3 object is a raw-loss incident. Losing an index, delaying ingestion, or making AOSS unavailable is a search incident; rebuild the projection from retained S3 objects.
+## Problem
 
-Managed ingestion narrows the runtime responsibilities owned by the platform team. AWS operates the OSIS service runtime. Platform owners still own the producer contract, Terraform-managed AOSS index and schema, S3 and search retention, access policies, monitoring, replay, capacity and cost settings, and failure handling.
+Durable evidence and search availability are different operational concerns. If a canonical S3 object is lost, the platform has a raw-data incident. If an index is unavailable, ingestion is delayed, or a search projection is deleted, the platform has a search incident that can be recovered by rebuilding from retained S3 objects. The design makes that distinction visible in storage, permissions, failure handling, and recovery procedures.
+
+## Key decisions
+
+- S3 is the canonical raw archive. OpenSearch is a rebuildable projection and never the only copy of a log.
+- SQS is the durable object/event retry boundary. Its source DLQ contains failed object/event messages, not individual sink documents.
+- OSIS owns managed ingestion runtime behavior: polling, visibility extension, decompression, parsing, retries, and sink-DLQ delivery.
+- Terraform owns the exact `logs` index and its strict mapping. OSIS uses `management_disabled`; unknown fields remain in `_source` but do not become searchable without schema review.
+- AOSS is private-only in steady state. A default-off, exact-collection network exception exists only for the measured AWS Cloud Control index lifecycle constraint and is removed by the lifecycle helper after the operation.
+
+## Validated on AWS
+
+The runtime evidence covers a dev-only temporary deployment. No production environment was deployed, and all test resources and test data were removed after validation.
+
+- OSIS reached `ACTIVE` and processed the S3 → SQS → OSIS → private AOSS path.
+- A private SigV4 query returned indexed documents with the occurrence timestamp, `ingested_at`, and expected parsed fields.
+- Malformed JSON was preserved as the raw `message` with an explicit parse-status marker.
+- Terraform-managed strict mapping was observed at runtime: `http.status_code` was `integer` with `coerce=false`, and `http.duration_ms` was `long` with `coerce=false`.
+- A numeric-looking string was rejected by the strict mapping and preserved in the S3 sink DLQ; the source queue and source DLQ remained empty.
+- Terraform destroy completed, including index and network-policy cleanup, and direct residual inventory was zero.
+
+The exact evidence boundary and unverified production concerns are documented in [runtime validation](docs/runtime-validation.md).
+
+## What I learned and evolved from the 2022 implementation
+
+The earlier design used Fluentd, multiple Firehose delivery streams, Lambda for transport or notification gaps, OpenSearch, selected S3 output, and CloudWatch-to-Slack alerting. It was useful for learning batching, retries, formats, permissions, and operational failure modes. This version turns those lessons into explicit ownership boundaries: S3 before search, separate source and sink failure units, event time distinct from ingestion time, Terraform-owned schema, separate dev/prod state roots, and least-privilege policies that can be reviewed independently.
+
+See the detailed comparison in [migration from 2022](docs/migration-from-2022.md).
 
 ## Architecture
 
@@ -62,7 +89,7 @@ Terraform workspaces remain useful for light variations of the same environment.
 
 Remote state uses a partial `backend "s3" {}` configuration. Each `backend.hcl.example` enables encryption and native S3 lockfiles with `use_lockfile = true`; deprecated DynamoDB-based locking is not copied forward. Backend buckets are intentionally not created or named by this repository.
 
-The AWS Cloud Control index resource cannot complete its lifecycle against this collection while every matching AOSS network policy is private. Authorized index apply/update operations must therefore use `scripts/aoss-index-lifecycle.sh apply --root infra/live/<environment> -- <terraform-options>`: it first applies an exact-collection, collection-only public network exception, then removes it in a second successful apply. Authorized destroy operations must use the helper's `destroy` mode, which enables the same exception before destroy and keeps it enabled until the index and policy are deleted. The helper requires an explicit live root, preserves the root's existing backend initialization, accepts options such as `-var-file=terraform.tfvars`, and never chooses production by default. See [operations.md](docs/operations.md) before any separately authorized AWS operation.
+The AWS Cloud Control index resource cannot complete its lifecycle against this collection while every matching AOSS network policy is private. Index apply/update operations must therefore use `scripts/aoss-index-lifecycle.sh apply --root infra/live/<environment> -- <terraform-options>`: it first applies an exact-collection, collection-only network exception, then removes it in a second successful apply. The helper's `destroy` mode enables the same exception before destroy and keeps it enabled until the index and policy are deleted. The helper requires an explicit live root, preserves the root's existing backend initialization, accepts options such as `-var-file=terraform.tfvars`, and never chooses production by default. See [operations.md](docs/operations.md) before a deployment review.
 
 ## Security
 
@@ -73,9 +100,17 @@ The AWS Cloud Control index resource cannot complete its lifecycle against this 
 - The ingestion role can read only the configured archive prefix and consume only the configured queue. Sink-DLQ writes must be limited to the designated S3 bucket and prefix.
 - `reader_principals` accepts collection-account IAM role/user ARNs and AOSS SAML user/group identity strings. Cross-account users must assume a role in the collection account. The SAML provider remains owned by the external identity platform.
 - Terraform owns the exact `logs` index lifecycle. The ingestion data policy grants OSIS the documented create, update, describe, and document-write actions only on that index, but `management_disabled` prevents the pipeline configuration from managing its schema. OSIS receives no template, read, or delete permissions.
-- No credentials or secrets appear in Terraform. Account IDs, principal identifiers, VPC IDs, and subnet IDs are deployment inputs, not secrets.
+- No credentials or secrets appear in Terraform or the example configuration. Deployment-specific identifiers are supplied outside the repository.
 
 See [security.md](docs/security.md) for IAM and data-access details.
+
+## Five-minute review path
+
+1. Read this summary and the [architecture diagram and contracts](docs/architecture.md).
+2. Read [runtime validation](docs/runtime-validation.md) to see what was proven on AWS and what remains unverified.
+3. Inspect the module boundaries under `infra/modules`, the independent roots under `infra/live`, and the mock tests under each module's `tests/` directory.
+4. Review [security](docs/security.md) and [operations](docs/operations.md) for IAM, private networking, lifecycle handling, and failure recovery.
+5. Compare the design with the [2022 migration](docs/migration-from-2022.md), or read the [Japanese case study](docs/portfolio-ja.md) for the portfolio narrative.
 
 ## How to verify
 
@@ -89,16 +124,25 @@ The script runs `terraform fmt -recursive -check`, then copies Terraform sources
 
 Local validation proves syntax, provider schema compatibility, and module wiring only. It does not prove regional service availability, IAM effectiveness, service quotas, OSIS pipeline acceptance, data throughput, availability behavior, or runtime recovery.
 
-## What is intentionally not implemented
+## Scope and operational boundary
 
-This repository does not implement an AWS deployment, an application, producer adapters, a dashboard frontend, an authentication UI, a SAML provider, multi-Region operation, cross-account central logging, a SIEM, Amazon Security Lake, a full OpenTelemetry traces/metrics platform, incident automation, Kubernetes, or Slack integration.
+This repository provides Terraform configuration, tests, lifecycle procedures, and evidence documentation. It does not provide a continuously running AWS environment, automatic deployment, producer adapters, a dashboard frontend, an authentication UI, a SAML provider, multi-Region operation, cross-account central logging, a SIEM, Amazon Security Lake, a full OpenTelemetry traces/metrics platform, incident automation, Kubernetes, or Slack integration.
 
 ## Start here
 
 1. Read [architecture.md](docs/architecture.md) and [security.md](docs/security.md).
 2. Copy the examples in one `infra/live/<environment>` directory without putting credentials in them.
 3. Run `make verify`.
-4. Treat any future plan or deployment as a separate, explicitly authorized task with an AWS account review, quota check, cost review, and runtime test plan.
+4. Treat any plan or deployment as a separate change requiring an AWS account review, quota check, cost review, and runtime test plan.
+
+## Documentation
+
+- [Japanese portfolio case study](docs/portfolio-ja.md)
+- [Runtime validation report](docs/runtime-validation.md)
+- [Architecture](docs/architecture.md)
+- [Security](docs/security.md)
+- [Operations and failure handling](docs/operations.md)
+- [Migration from 2022](docs/migration-from-2022.md)
 
 ## Authoritative references
 
@@ -109,3 +153,7 @@ This repository does not implement an AWS deployment, an application, producer a
 - [AWS: SAML authentication for OpenSearch Serverless](https://docs.aws.amazon.com/opensearch-service/latest/developerguide/serverless-saml.html)
 - [AWS: OpenSearch Ingestion metrics](https://docs.aws.amazon.com/opensearch-service/latest/developerguide/monitoring-pipeline-metrics.html)
 - [HashiCorp: S3 backend and native lockfiles](https://developer.hashicorp.com/terraform/language/backend/s3)
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
